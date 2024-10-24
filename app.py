@@ -3,39 +3,6 @@ import csv
 import io
 import re
 
-def parse_srt_timestamps(srt_content):
-    """Parse SRT file and extract timestamp blocks with their text."""
-    blocks = []
-    current_block = {'index': '', 'time': '', 'text': []}
-    
-    for line in srt_content.strip().split('\n'):
-        line = line.strip()
-        if not line:
-            if current_block['text']:
-                blocks.append(current_block.copy())
-                current_block = {'index': '', 'time': '', 'text': []}
-        elif current_block['index'] == '':
-            current_block['index'] = line
-        elif current_block['time'] == '':
-            current_block['time'] = line
-        else:
-            current_block['text'].append(line)
-    
-    if current_block['text']:
-        blocks.append(current_block)
-    
-    return blocks
-
-def convert_timestamp_to_seconds(timestamp):
-    """Convert SRT timestamp to seconds."""
-    hours, minutes, seconds = timestamp.replace(',', '.').split(':')
-    return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
-
-def parse_time_range(time_range):
-    """Parse SRT time range and return start and end times in seconds."""
-    start, end = time_range.split(' --> ')
-    return convert_timestamp_to_seconds(start), convert_timestamp_to_seconds(end)
-
 def split_into_sentences(text):
     """Split text into sentences using punctuation marks."""
     # Split on multiple punctuation marks while preserving them
@@ -53,43 +20,18 @@ def split_into_sentences(text):
     
     return complete_sentences
 
-def allocate_time_for_sentences(sentences, total_duration):
-    """Allocate time for each sentence based on character count with 15.26 chars/second."""
-    CHARS_PER_SECOND = 15.26
-    
-    # Calculate total characters
-    total_chars = sum(len(sentence) for sentence in sentences)
-    
-    # Calculate ideal duration for each sentence
-    ideal_durations = [len(sentence) / CHARS_PER_SECOND for sentence in sentences]
-    ideal_total = sum(ideal_durations)
-    
-    # Scale durations to match total available duration
-    scale_factor = total_duration / ideal_total
-    scaled_durations = [duration * scale_factor for duration in ideal_durations]
-    
-    return scaled_durations
-
-def create_csv_with_intelligent_timing(english_srt, translation_text):
-    """Create CSV file with intelligent timing based on character count."""
-    blocks = parse_srt_timestamps(english_srt)
+def create_csv_with_timing(translation_text, cps):
+    """Create CSV file with timing based on character count and specified CPS."""
     sentences = split_into_sentences(translation_text)
     
     csv_data = []
     csv_headers = ['speaker', 'transcription', 'translation', 'start_time', 'end_time']
     current_time = 0.0
     
-    # Get total duration from original SRT
-    total_duration = sum(
-        parse_time_range(block['time'])[1] - parse_time_range(block['time'])[0]
-        for block in blocks
-    )
-    
-    # Allocate durations based on character count
-    durations = allocate_time_for_sentences(sentences, total_duration)
-    
     # Create CSV entries
-    for sentence, duration in zip(sentences, durations):
+    for sentence in sentences:
+        # Calculate duration based on character count and CPS
+        duration = len(sentence) / cps
         end_time = current_time + duration
         
         csv_data.append({
@@ -112,22 +54,26 @@ def create_csv_with_intelligent_timing(english_srt, translation_text):
 
 # Streamlit interface
 st.title('Subtitle CSV Generator')
-st.write('This tool creates a CSV file with intelligent timing based on character count (15.26 characters per second).')
+st.write('This tool creates a CSV file with timing based on character count and customizable reading speed.')
 
-# File upload for English SRT
-english_srt_file = st.file_uploader("Upload English SRT file (for timing reference)", type=['srt', 'txt'])
+# CPS input with default value
+cps = st.number_input(
+    "Characters per second (CPS)",
+    min_value=1.0,
+    max_value=30.0,
+    value=15.26,
+    step=0.1,
+    help="Number of characters that can be read per second. Default is 15.26"
+)
 
 # Text area for translated text
 translation_text = st.text_area("Paste your translated text here", height=200)
 
 if st.button('Generate CSV'):
-    if english_srt_file is not None and translation_text:
+    if translation_text:
         try:
-            # Read the English SRT file
-            english_srt_content = english_srt_file.getvalue().decode('utf-8')
-            
             # Generate CSV content
-            csv_content = create_csv_with_intelligent_timing(english_srt_content, translation_text)
+            csv_content = create_csv_with_timing(translation_text, cps)
             
             # Display preview
             st.subheader("Generated CSV Preview")
@@ -141,22 +87,32 @@ if st.button('Generate CSV'):
                 mime="text/csv"
             )
             
+            # Display total duration
+            sentences = split_into_sentences(translation_text)
+            total_chars = sum(len(sentence) for sentence in sentences)
+            total_duration = total_chars / cps
+            st.info(f"""
+            Statistics:
+            - Total characters: {total_chars}
+            - Total duration: {total_duration:.2f} seconds ({int(total_duration/60)}:{int(total_duration%60):02d})
+            - Average characters per sentence: {total_chars/len(sentences):.1f}
+            """)
+            
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
     else:
-        st.warning("Please upload an English SRT file and provide the translated text.")
+        st.warning("Please provide the translated text.")
 
 st.markdown("""
 ### How to use:
-1. Upload your English SRT file (used only for total duration reference)
+1. Adjust the Characters per Second (CPS) if needed (default: 15.26)
 2. Paste your translated text
 3. Click 'Generate CSV'
 4. Download the generated CSV file
 
 Note: 
-- The tool intelligently allocates time for each subtitle based on character count
-- Uses standard reading speed of 15.26 characters per second
-- Preserves total video duration from original SRT
-- Splits text into natural sentences using punctuation
-- CSV includes speaker, transcription, translation, and timing information
+- The tool automatically splits text into sentences using punctuation
+- Timing is calculated based on character count and CPS
+- Each sentence gets its own line in the CSV
+- The CSV includes speaker, transcription, translation, and timing information
 """)
