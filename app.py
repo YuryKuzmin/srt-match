@@ -1,6 +1,7 @@
 import streamlit as st
 import csv
 import io
+import re
 
 def parse_srt_timestamps(srt_content):
     """Parse SRT file and extract timestamp blocks with their text."""
@@ -35,58 +36,71 @@ def parse_time_range(time_range):
     start, end = time_range.split(' --> ')
     return convert_timestamp_to_seconds(start), convert_timestamp_to_seconds(end)
 
-def split_translation_into_segments(translation_text, num_segments):
-    """Split the translation text into roughly equal segments based on punctuation."""
-    sentences = []
-    current_sentence = []
+def split_into_sentences(text):
+    """Split text into sentences using punctuation marks."""
+    # Split on multiple punctuation marks while preserving them
+    sentences = re.split(r'([.!?。！？])', text)
+    # Combine sentences with their punctuation marks and filter empty strings
+    complete_sentences = []
+    current_sentence = ''
     
-    for word in translation_text.replace('\n', ' ').split():
-        current_sentence.append(word)
-        if word.endswith(('.', '!', '?', '。', '！', '？')):
-            sentences.append(' '.join(current_sentence))
-            current_sentence = []
+    for i in range(0, len(sentences), 2):
+        current_sentence = sentences[i]
+        if i + 1 < len(sentences):  # If there's punctuation
+            current_sentence += sentences[i + 1]
+        if current_sentence.strip():
+            complete_sentences.append(current_sentence.strip())
     
-    if current_sentence:
-        sentences.append(' '.join(current_sentence))
-    
-    segments = [[] for _ in range(num_segments)]
-    current_segment = 0
-    
-    for sentence in sentences:
-        segments[current_segment].append(sentence)
-        current_segment = (current_segment + 1) % num_segments
-    
-    return [' '.join(segment) for segment in segments]
+    return complete_sentences
 
-def create_translated_srt_and_csv(english_srt, translation_text):
-    """Create both SRT and CSV files using English timestamps and translated text."""
-    blocks = parse_srt_timestamps(english_srt)
-    translated_segments = split_translation_into_segments(translation_text, len(blocks))
+def allocate_time_for_sentences(sentences, total_duration):
+    """Allocate time for each sentence based on character count with 15.26 chars/second."""
+    CHARS_PER_SECOND = 15.26
     
-    # Generate SRT content
-    srt_lines = []
-    # Generate CSV data
+    # Calculate total characters
+    total_chars = sum(len(sentence) for sentence in sentences)
+    
+    # Calculate ideal duration for each sentence
+    ideal_durations = [len(sentence) / CHARS_PER_SECOND for sentence in sentences]
+    ideal_total = sum(ideal_durations)
+    
+    # Scale durations to match total available duration
+    scale_factor = total_duration / ideal_total
+    scaled_durations = [duration * scale_factor for duration in ideal_durations]
+    
+    return scaled_durations
+
+def create_csv_with_intelligent_timing(english_srt, translation_text):
+    """Create CSV file with intelligent timing based on character count."""
+    blocks = parse_srt_timestamps(english_srt)
+    sentences = split_into_sentences(translation_text)
+    
     csv_data = []
     csv_headers = ['speaker', 'transcription', 'translation', 'start_time', 'end_time']
+    current_time = 0.0
     
-    for i, (block, translated_text) in enumerate(zip(blocks, translated_segments)):
-        # SRT format
-        srt_lines.extend([
-            str(i + 1),
-            block['time'],
-            translated_text,
-            ''
-        ])
+    # Get total duration from original SRT
+    total_duration = sum(
+        parse_time_range(block['time'])[1] - parse_time_range(block['time'])[0]
+        for block in blocks
+    )
+    
+    # Allocate durations based on character count
+    durations = allocate_time_for_sentences(sentences, total_duration)
+    
+    # Create CSV entries
+    for sentence, duration in zip(sentences, durations):
+        end_time = current_time + duration
         
-        # CSV format
-        start_time, end_time = parse_time_range(block['time'])
         csv_data.append({
             'speaker': 'Speaker 1',
-            'transcription': translated_text,
-            'translation': translated_text,
-            'start_time': f"{start_time:.3f}",
+            'transcription': sentence,
+            'translation': sentence,
+            'start_time': f"{current_time:.3f}",
             'end_time': f"{end_time:.3f}"
         })
+        
+        current_time = end_time
     
     # Create CSV content
     csv_output = io.StringIO()
@@ -94,49 +108,38 @@ def create_translated_srt_and_csv(english_srt, translation_text):
     writer.writeheader()
     writer.writerows(csv_data)
     
-    return '\n'.join(srt_lines), csv_output.getvalue()
+    return csv_output.getvalue()
 
 # Streamlit interface
-st.title('SRT and CSV Translation Helper')
-st.write('This tool helps you create both translated SRT and CSV files using timestamps from an English SRT file.')
+st.title('Subtitle CSV Generator')
+st.write('This tool creates a CSV file with intelligent timing based on character count (15.26 characters per second).')
 
 # File upload for English SRT
-english_srt_file = st.file_uploader("Upload English SRT file", type=['srt', 'txt'])
+english_srt_file = st.file_uploader("Upload English SRT file (for timing reference)", type=['srt', 'txt'])
 
 # Text area for translated text
 translation_text = st.text_area("Paste your translated text here", height=200)
 
-if st.button('Generate Files'):
+if st.button('Generate CSV'):
     if english_srt_file is not None and translation_text:
         try:
             # Read the English SRT file
             english_srt_content = english_srt_file.getvalue().decode('utf-8')
             
-            # Generate both SRT and CSV content
-            translated_srt, csv_content = create_translated_srt_and_csv(english_srt_content, translation_text)
+            # Generate CSV content
+            csv_content = create_csv_with_intelligent_timing(english_srt_content, translation_text)
             
-            # Create two columns for the output
-            col1, col2 = st.columns(2)
+            # Display preview
+            st.subheader("Generated CSV Preview")
+            st.text_area("CSV Content", csv_content, height=300)
             
-            with col1:
-                st.subheader("Generated SRT")
-                st.text_area("SRT Content", translated_srt, height=300)
-                st.download_button(
-                    label="Download SRT file",
-                    data=translated_srt.encode('utf-8'),
-                    file_name="translated.srt",
-                    mime="text/plain"
-                )
-            
-            with col2:
-                st.subheader("Generated CSV")
-                st.text_area("CSV Content", csv_content, height=300)
-                st.download_button(
-                    label="Download CSV file",
-                    data=csv_content.encode('utf-8'),
-                    file_name="translated.csv",
-                    mime="text/csv"
-                )
+            # Download button
+            st.download_button(
+                label="Download CSV file",
+                data=csv_content.encode('utf-8'),
+                file_name="translated.csv",
+                mime="text/csv"
+            )
             
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
@@ -145,14 +148,15 @@ if st.button('Generate Files'):
 
 st.markdown("""
 ### How to use:
-1. Upload your English SRT file
+1. Upload your English SRT file (used only for total duration reference)
 2. Paste your translated text
-3. Click 'Generate Files'
-4. Download both the SRT and CSV files
+3. Click 'Generate CSV'
+4. Download the generated CSV file
 
 Note: 
-- The tool will try to match the translated text to the original timing
-- The CSV file follows the specified format with Speaker 1 as the default speaker
-- Both transcription and translation columns in the CSV contain the same translated text
-- Times are converted to seconds for the CSV format
+- The tool intelligently allocates time for each subtitle based on character count
+- Uses standard reading speed of 15.26 characters per second
+- Preserves total video duration from original SRT
+- Splits text into natural sentences using punctuation
+- CSV includes speaker, transcription, translation, and timing information
 """)
